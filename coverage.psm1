@@ -24,31 +24,37 @@ function Get-CodeCoverage{
 
         # ensuring absolute path to the project is always used
         Write-Debug -Message "Test project path $testProjectPath"
-        $absoluteTestProjectPath = Assert-AbsolutePath -RelativeDirectoryPath $TestProjectPath
+        $absoluteTestProjectPath = Resolve-Path $TestProjectPath
         Write-Debug -Message "Absolute path to test project: $absoluteTestProjectPath"
 
-        $testProjectDirectory = [System.IO.Directory]::GetParent($absoluteTestProjectPath)
+        $testProjectDirectory = Split-Path $absoluteTestProjectPath
         Write-Debug -Message "Test project directory: $testProjectDirectory"
 
-        if ([string]::IsNullOrEmpty($TestSettingsPath))
+        if ($null -eq $TestSettingsPath -or $TestSettingsPath -eq "")
         {
             # if test settings file path is not provided, try to auto-guess it
             $testSettingsFileName = Get-ChildItem -File -Filter *.runsettings -Path $testProjectDirectory -Name | Select-Object -First 1;
             Write-Debug -Message "Test settings file $testSettingsFileName"
-            $testSettingsPath = [System.IO.Path]::Combine($testProjectDirectory, $testSettingsFileName)
+            $testSettingsPath = Join-Path -Path $testProjectDirectory -ChildPath $testSettingsFileName
             Write-Debug -Message "Test settings full path $testSettingsPath"
         }
+
+        $testSettingsPresent = $true
         if (-not (Test-Path $TestSettingsPath))
         {
-            throw [System.IO.FileNotFoundException] "$TestSettingsPath not found."
+            $testSettingsPresent = $false
+            Write-Error -Message "$TestSettingsPath not found."
+            Write-Error -Message "Coverage report will be generated, but it might include thrid-party dependencies"
         }
-        # ensure absolute path is used
-        Write-Debug -Message "Test settings path $TestSettingsPath"
-        $absoluteTestSettingsPath = Assert-AbsolutePath -RelativeDirectoryPath $TestSettingsPath
-        Write-Debug -Message "Absolute path to test settings file: $absoluteTestSettingsPath"
-
+        if ($testSettingsPresent)
+        {
+            # ensure absolute path is used
+            Write-Debug -Message "Test settings path $TestSettingsPath"
+            $absoluteTestSettingsPath = Resolve-Path $TestSettingsPath
+            Write-Debug -Message "Absolute path to test settings file: $absoluteTestSettingsPath"
+        }
         # test results directory
-        $testResultDirectory = [System.IO.Path]::Combine($testProjectDirectory, $testResultDirectoryName)
+        $testResultDirectory = Join-Path -Path $testProjectDirectory -ChildPath $testResultDirectoryName
         Write-Debug -Message "TestResult directory: $testResultDirectory"
 
         # check if required packages are installed and added as project references
@@ -61,21 +67,26 @@ function Get-CodeCoverage{
         $reportGeneratorDirectory = Get-LatestPackageDirectory -PackageName $package
 
         # run tests with rebuild if packages were not installed before running this script
-        $testRunnerCommand = [string]::Concat('dotnet test ', $absoluteTestProjectPath, ' -v q --settings:',$absoluteTestSettingsPath)
+        # permit running tests without settings file
+        $testRunnerCommand = "dotnet test " + $absoluteTestProjectPath + " -v q"
+        if ($testSettingsPresent)
+        {
+            $testRunnerCommand += " --settings:" + $absoluteTestSettingsPath
+        }
         if (-not $coverageInstalled -and -not $reportGeneratorInstalled) {
-            $testRunnerCommand = [string]::Concat($testRunnerCommand, ' --no-build')
+            $testRunnerCommand += " --no-build"
         }
         Write-Debug -Message "Running tests via $testRunnerCommand"
         Invoke-Expression $testRunnerCommand
 
         # get the most recent coverage file
         $recentCoverageFile = Get-ChildItem -File -Filter *.coverage -Path $testResultDirectory -Name -Recurse | Select-Object -First 1;
-        $recentCoverage = [System.IO.Path]::Combine($testResultDirectory, $recentCoverageFile)
+        $recentCoverage = Join-Path -Path $testResultDirectory -ChildPath $recentCoverageFile
         Write-Host "Test Completed, coverage file : $recentCoverage"  -ForegroundColor Green
 
         # convert coverage file from binary to xml
-        $coverageFile = [System.IO.Path]::Combine($testResultDirectory, $coverageXmlFilename)
-        $coverageCall = [string]::Concat($coverageDirectory, '\build\netstandard1.0\CodeCoverage\CodeCoverage.exe analyze  /output:', $coverageFile, ' ', $recentCoverage)
+        $coverageFile = Join-Path -Path $testResultDirectory -ChildPath $coverageXmlFilename
+        $coverageCall = $coverageDirectory + '\build\netstandard1.0\CodeCoverage\CodeCoverage.exe analyze  /output:' + $coverageFile + ' ' + $recentCoverage
         Write-Debug -Message "Converting coverage results via: $coverageCall"
         Invoke-Expression $coverageCall
         Write-Host 'CoverageXML Generated in $coverageFile'  -ForegroundColor Green
@@ -83,8 +94,8 @@ function Get-CodeCoverage{
         if (Test-Path $coverageFile)
         {
             # if binary-to-xml conversion succeeded, prepare an html report
-            $outputDirectory = [System.IO.Path]::Combine($testResultDirectory, $coverageReportDirectory)
-            $reportCall = [string]::Concat('dotnet ', $reportGeneratorDirectory, '\tools\netcoreapp3.0\ReportGenerator.dll "-reports:', $coverageFile, '"', ' "-targetdir:', $outputDirectory, '"')
+            $outputDirectory = Join-Path -Path $testResultDirectory -ChildPath $coverageReportDirectory
+            $reportCall = 'dotnet ' + $reportGeneratorDirectory + '\tools\netcoreapp3.0\ReportGenerator.dll "-reports:' + $coverageFile + '" "-targetdir:' + $outputDirectory + '"'
             Write-Debug -Message "Generating coverage report via: $reportCall"
             Invoke-Expression $reportCall
             Write-Host 'CoverageReport Published'  -ForegroundColor Green
@@ -92,7 +103,7 @@ function Get-CodeCoverage{
             if ($OpenReport)
             {
                 # open browser with report if required
-                $reportPath = [System.IO.Path]::Combine($testResultDirectory, $coverageReportDirectory, 'index.htm')
+                $reportPath = Join-Path -Path $testResultDirectory -ChildPath $coverageReportDirectory | Join-Path -ChildPath 'index.htm'
                 if (Test-Path $reportPath)
                 {
                     Invoke-Expression $reportPath
@@ -114,26 +125,8 @@ function Get-CodeCoverage{
         Write-Host "Exception Line: $($_.ScriptStackTrace)" -ForegroundColor Red
     }
     finally{
-        [System.Console]::ResetColor()
+        [Console]::ResetColor()
     }
-}
-
-function Assert-AbsolutePath{
-    param (
-        [Parameter(Mandatory=$true)]
-        [string] $RelativeDirectoryPath
-    )
-
-    Write-Debug -Message "Assert-AbsolutePath for $RelativeDirectoryPath"
-    $absolutePath = $RelativeDirectoryPath
-    if (-not [System.IO.Path]::IsPathRooted($absolutePath))
-    {
-        $currentDirectory = $PSScriptRoot
-        Write-Debug -Message "Current directory $currentDirectory"
-        $absolutePath = [System.IO.Path]::Combine($currentDirectory, $absolutePath)
-    }
-    Write-Debug -Message "Absolute path: $absolutePath"
-    return $absolutePath
 }
 
 function Assert-Package{
@@ -162,9 +155,9 @@ function Get-LatestPackageDirectory{
     )
 
     Write-Debug -Message "Get-LatestPackageDirectory $PackageName"
-    $packageDirectory = [string]::Concat($env:USERPROFILE,'\.nuget\packages\', $PackageName)
+    $packageDirectory = Join-Path -Path $env:USERPROFILE -ChildPath '.nuget' | Join-Path -ChildPath 'packages' | Join-Path -ChildPath $PackageName
     Write-Debug -Message "Package Directory: $packageDirectory"
     $latestPackageVersion = Get-ChildItem -Directory -Path $packageDirectory -Name | Select-Object -Last 1;
     Write-Debug -Message "Latest package version: $latestPackageVersion"
-    return [System.IO.Path]::Combine($packageDirectory, $latestPackageVersion)
+    return Join-Path -Path $packageDirectory -ChildPath $latestPackageVersion
 }
